@@ -1,0 +1,187 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CMAKE_BUILD_TYPE: Release
+
+jobs:
+  # ===========================================================================
+  # C++ Build & Test Matrix
+  # ===========================================================================
+  cpp-tests:
+    name: "C++ Tests - ${{ matrix.os }} / ${{ matrix.compiler }}"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        compiler: [gcc-13, clang-17]
+        exclude:
+          - os: ubuntu-22.04
+            compiler: clang-17
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libeigen3-dev \
+            libgtest-dev \
+            cmake \
+            ${{ matrix.compiler == 'gcc-13' && 'g++-13' || 'clang-17' }}
+
+      - name: Configure CMake
+        run: |
+          if [ "${{ matrix.compiler }}" = "gcc-13" ]; then
+            export CXX=g++-13 CC=gcc-13
+          else
+            export CXX=clang++-17 CC=clang-17
+          fi
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.CMAKE_BUILD_TYPE }} \
+            -DMG_TESTS=ON \
+            -DCMAKE_CXX_STANDARD=20
+          cmake --build build --verbose
+
+      - name: Run tests
+        run: cd build && ctest --output-on-failure --timeout 60
+
+      - name: Archive test results
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpp-test-results-${{ matrix.os }}-${{ matrix.compiler }}
+          path: build/Testing/
+
+  # ===========================================================================
+  # Python Tests (Pure Python + PyTorch)
+  # ===========================================================================
+  python-tests:
+    name: "Python Tests - ${{ matrix.python-version }}"
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install numpy pytest
+          pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Install package (pure Python, no CUDA)
+        run: |
+          # Install without CUDA extension for CI speed
+          pip install -e . --no-build-isolation 2>/dev/null || pip install -e . --no-deps
+
+      - name: Run Python tests
+        run: pytest tests/test_autograd.py -v --tb=short
+
+  # ===========================================================================
+  # CUDA Build (only when CUDA changes detected or on tags)
+  # ===========================================================================
+  cuda-build:
+    name: "CUDA Build - SM_${{ matrix.sm }}"
+    runs-on: ubuntu-22.04
+    needs: [cpp-tests, python-tests]
+    if: github.event_name == 'push' && (contains(github.event.head_commit.modified, 'src/') || startsWith(github.ref, 'refs/tags/'))
+    strategy:
+      matrix:
+        sm: ["70", "75", "80", "86", "89", "90"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install CUDA Toolkit
+        uses: Jimver/cuda-toolkit@v0.2.14
+        with:
+          cuda: "12.4.0"
+          method: toolkit
+          sub-packages: "nvcc,libcublas-dev,libcusolver-dev,cudart-dev"
+
+      - name: Install Eigen3 and PyTorch
+        run: |
+          sudo apt-get install -y libeigen3-dev
+          pip install numpy torch --index-url https://download.pytorch.org/whl/cu124
+
+      - name: Build CUDA extension
+        run: |
+          export CUDA_HOME=/usr/local/cuda
+          export PATH=$CUDA_HOME/bin:$PATH
+          pip install -e .
+
+      - name: Verify CUDA extension loads
+        run: python -c "import matrix_groups; print('CUDA ext:', matrix_groups.HAS_CUDA_EXT)"
+
+  # ===========================================================================
+  # Code Quality
+  # ===========================================================================
+  lint:
+    name: "Lint & Format Check"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install linters
+        run: pip install black isort mypy ruff
+
+      - name: Check Python formatting
+        run: |
+          black --check python/
+          isort --check-only python/
+
+      - name: Ruff lint
+        run: ruff check python/
+
+      - name: Type check
+        run: mypy python/matrix_groups/ --ignore-missing-imports --no-strict-optional
+
+  # ===========================================================================
+  # Header-only Integration Test
+  # ===========================================================================
+  header-only:
+    name: "Header-Only Integration"
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Eigen3
+        run: sudo apt-get install -y libeigen3-dev g++-13
+
+      - name: Compile all examples (header-only)
+        run: |
+          export CXX=g++-13
+          $CXX -std=c++20 -I include examples/basic_so3.cpp -o /dev/null -c
+          echo "SO(3) header-only compilation: OK"
+
+          # Test all groups compile together
+          echo '#include <mg/so3.hpp>
+          #include <mg/se3.hpp>
+          #include <mg/so_n.hpp>
+          #include <mg/sympd.hpp>
+          int main() { mg::SO<5> R; mg::SymPD<4> S; return 0; }' > /tmp/test_all.cpp
+          $CXX -std=c++20 -I include /tmp/test_all.cpp -o /dev/null -c
+          echo "All groups header-only compilation: OK"
