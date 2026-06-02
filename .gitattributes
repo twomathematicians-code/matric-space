@@ -1,2 +1,56 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# C++ / CUDA sources
+*.hpp text diff=c++
+*.cpp text diff=c++
+*.cuh text diff=c++
+*.cu text diff=c++
+
+# Python sources
+*.py text diff=python
+*.pyx text diff=python
+
+# CMake
+CMakeLists.txt text diff=cmake
+*.cmake text diff=cmake
+
+# Markdown / documentation
+*.md text diff=markdown
+*.rst text diff=restructuredtext
+*.txt text
+
+# Web / config files
+*.json text
+*.toml text
+*.yaml text
+*.yml text
+*.xml text
+
+# Shell scripts
+*.sh text eol=lf
+
+# Build outputs (binary - never diff)
+*.o binary
+*.so binary
+*.dylib binary
+*.dll binary
+*.a binary
+*.lib binary
+*.exe binary
+
+# CUDA PTX / cubin (binary)
+*.ptx binary
+*.cubin binary
+
+# PDF / images (binary - use Git LFS for large files)
+*.pdf binary
+*.png binary
+*.jpg binary
+*.svg text
+
+# Lock files
+*.lock binary
+
+# Line ending enforcement for shell scripts
+*.sh eol=lf
